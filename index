@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marcador de PDF</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;background:#555}
+#bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px;background:#222;color:#fff}
+#bar button,#bar select{padding:6px 10px;border:1px solid #666;border-radius:6px;background:#3a3a3a;color:#fff;cursor:pointer}
+#bar button.on{background:#0a7;border-color:#0fc}#bar button:hover{background:#4a4a4a}
+#bar input[type=number]{width:60px;padding:5px}
+#wrap{flex:1;overflow:auto;padding:15px}
+#stage{position:relative;margin:0 auto;width:max-content;background:#fff;box-shadow:0 0 12px #000}
+canvas{display:block}#ov{position:absolute;left:0;top:0;cursor:crosshair}
+.sep{width:1px;height:24px;background:#666}#msg{color:#fc6}label{white-space:nowrap}
+</style></head><body>
+<div id="bar">
+ <input type="file" id="f" accept="application/pdf">
+ <input type="file" id="pj" accept=".json" hidden>
+ <button id="op">Abrir projeto</button><button id="sv">Salvar projeto</button>
+ <button id="png">Exportar PNG</button><button id="pdfx">Exportar PDF</button>
+ <span class="sep"></span>
+ <button class="tool" data-t="triangle">▲ Verde <b></b></button>
+ <button class="tool" data-t="circle">● Vermelho <b></b></button>
+ <button class="tool" data-t="trapezoid">⏢ Azul <b></b></button>
+ <button class="tool" data-t="star">★ Amarela <b></b></button>
+ <span class="sep"></span>
+ <label>Tamanho <input type="range" id="sz" min="8" max="600" value="40"></label>
+ <label>Nº <input type="range" id="fz" min="20" max="200" value="80"></label>
+ <label>Nº da figura <input type="number" id="nm" min="1"></label>
+ <label>Giro° <input type="number" id="an" step="5"></label>
+ <label>Figura <select id="ty"><option value="triangle">▲</option><option value="circle">●</option><option value="trapezoid">⏢</option><option value="star">★</option></select></label>
+ <button id="del">Excluir</button><button id="un">Desfazer</button>
+ <span class="sep"></span>
+ <button id="zo">−</button><span id="zl">100%</span><button id="zi">+</button><button id="fit">Ajustar</button>
+ <span class="sep"></span>
+ <button id="pp">◀</button><span id="pg">-</span><button id="pn">▶</button><button id="ns">Numeração da página…</button>
+ <span id="msg">Abra um PDF</span>
+</div>
+<div id="wrap"><div id="stage"><canvas id="pdf"></canvas><canvas id="ov"></canvas></div></div>
+<script>
+const T=['triangle','circle','trapezoid','star'];
+const COL={triangle:['#1fa83c','#ffffff'],circle:['#e02424','#ffffff'],trapezoid:['#1f5fe0','#ffffff'],star:['#ffd400','#000000']};
+const $=id=>document.getElementById(id),pdfc=$('pdf'),ov=$('ov'),wrap=$('wrap');
+let doc,bytes,base='projeto',pn=1,zoom=1,pageW=600,shapes=[],pageStart={},hist=[],tool=null,sel=null,drag=null,task=null,tok=0,projLoaded=false;
+const fmt=n=>n<100?String(n).padStart(2,'0'):String(n);
+
+// ---------- bibliotecas (carregadas da internet) ----------
+const ls=(u,i=0)=>new Promise((ok,no)=>{if(i>=u.length)return no(new Error('não consegui carregar uma biblioteca (verifique a internet)'));
+ const s=document.createElement('script');s.src=u[i];s.onload=()=>ok(u[i]);s.onerror=()=>ls(u,i+1).then(ok,no);document.head.appendChild(s)});
+const lib=ls(['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js']).then(async u=>{
+ const w=u.replace('pdf.min.js','pdf.worker.min.js');pdfjsLib.GlobalWorkerOptions.workerSrc=w;
+ try{const t=await(await fetch(w)).text();pdfjsLib.GlobalWorkerOptions.workerSrc=URL.createObjectURL(new Blob([t],{type:'text/javascript'}))}catch(e){}});
+lib.catch(e=>$('msg').textContent='Erro: '+e.message);
+let plib;const getPdfLib=()=>plib||(plib=ls(['https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js','https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js']));
+
+// ---------- geometria e desenho ----------
+const poly0=(t,x,y,r)=>t==='triangle'?[[x,y-r],[x+r,y+.8*r],[x-r,y+.8*r]]:t==='trapezoid'?[[x-.5*r,y-.7*r],[x+.5*r,y-.7*r],[x+r,y+.7*r],[x-r,y+.7*r]]:
+ t==='star'?Array.from({length:10},(_,i)=>{const a=-Math.PI/2+i*Math.PI/5,q=i%2?r*.45:r;return[x+q*Math.cos(a),y+q*Math.sin(a)]}):null;
+const poly=(t,x,y,r,g=0)=>{const p=poly0(t,x,y,r);if(!p||!g)return p;const c=Math.cos(g),s=Math.sin(g);return p.map(([u,v])=>[x+(u-x)*c-(v-y)*s,y+(u-x)*s+(v-y)*c])};
+function drawShapes(c,k,p,selected){for(const o of shapes){if(o.p!==p)continue;const x=o.x*k,y=o.y*k,r=o.s/2*k,pts=poly(o.t,x,y,r,o.a||0);
+ c.beginPath();if(pts){pts.forEach((q,i)=>c[i?'lineTo':'moveTo'](q[0],q[1]));c.closePath()}else c.arc(x,y,r,0,7);
+ c.fillStyle=COL[o.t][0];c.fill();c.lineWidth=Math.max(1,r*.06);c.strokeStyle='#000';c.stroke();
+ c.save();c.translate(x,y);c.rotate(o.a||0);c.fillStyle=COL[o.t][1];c.font='bold '+(r*o.f/100)+'px sans-serif';c.textAlign='center';c.textBaseline='middle';
+ c.fillText(fmt(o.n),0,o.t==='triangle'?r*.25:0);c.restore();
+ if(o===selected){const d=devicePixelRatio||1,R=r*1.1+4*d,h=24*d;c.save();c.translate(x,y);c.rotate(o.a||0);c.setLineDash([6,4]);c.lineWidth=2;c.strokeStyle='#00e5ff';c.strokeRect(-R,-R,2*R,2*R);c.setLineDash([]);
+ c.beginPath();c.moveTo(0,-R);c.lineTo(0,-R-h);c.stroke();c.fillStyle='#00e5ff';c.beginPath();c.arc(0,-R-h,6*d,0,7);c.fill();c.fillRect(R-5*d,R-5*d,10*d,10*d);c.restore()}}}
+function draw(){const c=ov.getContext('2d');c.clearRect(0,0,ov.width,ov.height);drawShapes(c,zoom*(devicePixelRatio||1),pn,sel);sync()}
+
+async function render(){if(!doc)return;const my=++tok;
+ if(task){task.cancel();try{await task.promise}catch(e){}}
+ if(my!==tok)return;
+ const pg=await doc.getPage(pn),d=devicePixelRatio||1,vp=pg.getViewport({scale:zoom*d});pageW=pg.getViewport({scale:1}).width;
+ pdfc.width=ov.width=vp.width;pdfc.height=ov.height=vp.height;
+ pdfc.style.width=ov.style.width=vp.width/d+'px';pdfc.style.height=ov.style.height=vp.height/d+'px';
+ $('zl').textContent=Math.round(zoom*100)+'%';$('pg').textContent=pn+'/'+doc.numPages;
+ task=pg.render({canvasContext:pdfc.getContext('2d'),viewport:vp});
+ try{await task.promise}catch(e){return}
+ draw()}
+
+// ---------- numeração ----------
+function nextN(t,p,ex){const s=(pageStart[p]||{})[t]||1,u=new Set(shapes.filter(o=>o.t===t&&o.p===p&&o!==ex).map(o=>o.n));let n=s;while(u.has(n))n++;return n}
+function askStart(p){const v=prompt('Página '+p+' — de qual número começar?\n• Deixe vazio = CONTINUAR a numeração das páginas anteriores\n• Digite 1 para reiniciar (ou outro número inicial)'),k=parseInt(v);
+ pageStart[p]=Object.fromEntries(T.map(t=>[t,(v&&k>0)?k:Math.max(0,...shapes.filter(o=>o.t===t&&o.p<p).map(o=>o.n))+1]));sync()}
+function sync(){document.querySelectorAll('.tool').forEach(b=>{b.querySelector('b').textContent=fmt(nextN(b.dataset.t,pn));b.classList.toggle('on',b.dataset.t===tool)});
+ if(sel){$('sz').value=sel.s;$('fz').value=sel.f;$('nm').value=sel.n;$('an').value=Math.round(((sel.a||0)*180/Math.PI%360+360)%360);$('ty').value=sel.t}$('nm').disabled=$('ty').disabled=$('an').disabled=!sel}
+
+// ---------- histórico ----------
+const push=()=>{hist.push(JSON.stringify({shapes,pageStart}));if(hist.length>200)hist.shift()};
+const undo=()=>{if(!hist.length)return;const s=JSON.parse(hist.pop());shapes=s.shapes;pageStart=s.pageStart;sel=null;draw()};
+const delSel=()=>{if(sel){push();shapes=shapes.filter(o=>o!==sel);sel=null;draw()}};
+$('un').onclick=undo;$('del').onclick=delSel;
+addEventListener('keydown',e=>{const inp=e.target.tagName==='INPUT'||e.target.tagName==='SELECT';
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!inp){e.preventDefault();undo()}
+ else if(!inp&&(e.key==='Delete'||e.key==='Backspace'))delSel();
+ else if(e.key==='Escape'){tool=null;sel=null;draw()}});
+
+// ---------- abrir PDF ----------
+$('f').onchange=async e=>{const file=e.target.files[0];if(!file)return;$('msg').textContent='Carregando...';
+ try{await lib;const buf=await file.arrayBuffer();bytes=new Uint8Array(buf.slice(0));doc=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise}
+ catch(err){$('msg').textContent='Erro: '+(err.message||err);return}
+ base=file.name.replace(/\.pdf$/i,'');if(!projLoaded){shapes=[];pageStart={}}projLoaded=false;hist=[];sel=null;pn=1;
+ const p=await doc.getPage(1);pageW=p.getViewport({scale:1}).width;
+ $('sz').value=Math.round(pageW/30);zoom=(wrap.clientWidth-40)/pageW;$('msg').textContent='';render()};
+
+// ---------- interação ----------
+const hit=(x,y)=>{for(let i=shapes.length-1;i>=0;i--){const o=shapes[i];if(o.p===pn&&Math.hypot(o.x-x,o.y-y)<=o.s/2)return o}};
+document.querySelectorAll('.tool').forEach(b=>b.onclick=()=>{tool=tool===b.dataset.t?null:b.dataset.t;ov.style.cursor=tool?'crosshair':'default';sync()});
+ov.onpointerdown=e=>{if(!doc)return;const x=e.offsetX/zoom,y=e.offsetY/zoom,o=hit(x,y);
+ const hd=sel&&grab(x,y);
+ if(hd){drag={mode:hd,moved:false,s0:sel.s,a0:sel.a||0,d0:Math.hypot(x-sel.x,y-sel.y)||1,g0:Math.atan2(y-sel.y,x-sel.x)};ov.setPointerCapture(e.pointerId)}
+ else if(o){sel=o;drag={mode:'move',dx:o.x-x,dy:o.y-y,moved:false};ov.setPointerCapture(e.pointerId)}
+ else if(tool){push();sel={t:tool,n:nextN(tool,pn),x,y,s:+$('sz').value,f:+$('fz').value,a:0,p:pn};shapes.push(sel)}
+ else sel=null;
+ draw()};
+function grab(x,y){const o=sel,a=o.a||0,c=Math.cos(a),s=Math.sin(a),R=o.s/2*1.1+4/zoom,h=24/zoom,tol=11/zoom,P=(u,v)=>[o.x+u*c-v*s,o.y+u*s+v*c];
+ let q=P(0,-R-h);if(Math.hypot(q[0]-x,q[1]-y)<tol)return'rot';q=P(R,R);if(Math.hypot(q[0]-x,q[1]-y)<tol)return'scale'}
+ov.onpointermove=e=>{const x=e.offsetX/zoom,y=e.offsetY/zoom;
+ if(!drag||!sel){if(!drag)ov.style.cursor=sel&&grab(x,y)?'grab':hit(x,y)?'move':tool?'crosshair':'default';return}
+ if(!drag.moved){push();drag.moved=true}
+ if(drag.mode==='rot'){let a=drag.a0+Math.atan2(y-sel.y,x-sel.x)-drag.g0;if(e.shiftKey)a=Math.round(a/(Math.PI/12))*Math.PI/12;sel.a=a}
+ else if(drag.mode==='scale')sel.s=Math.min(600,Math.max(8,drag.s0*Math.hypot(x-sel.x,y-sel.y)/drag.d0));
+ else{sel.x=x+drag.dx;sel.y=y+drag.dy}
+ draw()};
+ov.onpointerup=()=>drag=null;
+$('sz').onpointerdown=$('fz').onpointerdown=()=>{if(sel)push()};
+$('sz').oninput=()=>{if(sel){sel.s=+$('sz').value;draw()}};
+$('fz').oninput=()=>{if(sel){sel.f=+$('fz').value;draw()}};
+$('nm').onchange=()=>{const v=parseInt($('nm').value);if(!sel||!(v>0))return;push();sel.n=v;
+ $('msg').textContent=shapes.some(o=>o!==sel&&o.t===sel.t&&o.p===sel.p&&o.n===v)?'Atenção: já existe essa figura com o nº '+fmt(v)+' nesta página':'';draw()};
+$('ty').onchange=()=>{if(!sel)return;push();sel.t=$('ty').value;sel.n=nextN(sel.t,sel.p,sel);draw()};
+$('an').onchange=()=>{if(!sel)return;push();sel.a=(+$('an').value||0)*Math.PI/180;draw()};
+
+// ---------- zoom e páginas ----------
+const setZ=z=>{zoom=Math.min(8,Math.max(.1,z));render()};
+$('zi').onclick=()=>setZ(zoom*1.25);$('zo').onclick=()=>setZ(zoom/1.25);$('fit').onclick=()=>setZ((wrap.clientWidth-40)/pageW);
+wrap.addEventListener('wheel',e=>{if(e.ctrlKey){e.preventDefault();setZ(zoom*(e.deltaY<0?1.1:1/1.1))}},{passive:false});
+const go=n=>{if(!doc||n<1||n>doc.numPages)return;pn=n;sel=null;if(pn>1&&!pageStart[pn])askStart(pn);render()};
+$('pp').onclick=()=>go(pn-1);$('pn').onclick=()=>go(pn+1);$('ns').onclick=()=>{if(doc)askStart(pn)};
+
+// ---------- salvar / exportar ----------
+const save=(b,n)=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=n;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)};
+$('sv').onclick=()=>save(new Blob([JSON.stringify({v:1,file:base,shapes,pageStart})],{type:'application/json'}),base+'_projeto.json');
+$('op').onclick=()=>$('pj').click();
+$('pj').onchange=async e=>{const f=e.target.files[0];if(!f)return;
+ try{const j=JSON.parse(await f.text());push();shapes=j.shapes||[];pageStart=j.pageStart||{};sel=null;projLoaded=!doc;draw();
+  $('msg').textContent=doc?'Projeto carregado':'Projeto carregado — agora abra o PDF correspondente'}catch(err){$('msg').textContent='Arquivo de projeto inválido'}e.target.value=''};
+$('png').onclick=async()=>{if(!doc)return;const pg=await doc.getPage(pn),k=Math.min(4,3000/pageW),vp=pg.getViewport({scale:k}),c=document.createElement('canvas');
+ c.width=vp.width;c.height=vp.height;await pg.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;drawShapes(c.getContext('2d'),k,pn,null);
+ c.toBlob(b=>save(b,base+'_p'+pn+'.png'))};
+$('pdfx').onclick=async()=>{if(!doc)return;$('msg').textContent='Gerando PDF...';
+ try{await getPdfLib();const{PDFDocument,StandardFonts,rgb,degrees}=PDFLib,hx=h=>{const n=parseInt(h.slice(1),16);return rgb((n>>16)/255,((n>>8)&255)/255,(n&255)/255)};
+  const d=await PDFDocument.load(bytes),font=await d.embedFont(StandardFonts.HelveticaBold);
+  d.getPages().forEach((pg,i)=>{const cb=pg.getCropBox(),W=cb.width,H=cb.height,rot=((pg.getRotation().angle%360)+360)%360;
+   const map=(vx,vy)=>rot===90?[cb.x+vy,cb.y+vx]:rot===180?[cb.x+W-vx,cb.y+vy]:rot===270?[cb.x+W-vy,cb.y+H-vx]:[cb.x+vx,cb.y+H-vy];
+   for(const o of shapes){if(o.p!==i+1)continue;const r=o.s/2,pts=poly(o.t,0,0,r,0),[ux,uy]=map(o.x,o.y),th=rot-(o.a||0)*180/Math.PI,rd=th*Math.PI/180;
+    const path=pts?'M'+pts.map(q=>q[0]+' '+q[1]).join(' L')+' Z':`M ${-r} 0 a ${r} ${r} 0 1 0 ${2*r} 0 a ${r} ${r} 0 1 0 ${-2*r} 0 Z`;
+    pg.drawSvgPath(path,{x:ux,y:uy,rotate:degrees(th),color:hx(COL[o.t][0]),borderColor:rgb(0,0,0),borderWidth:r*.06});
+    const t=fmt(o.n),fs=r*o.f/100,w=font.widthOfTextAtSize(t,fs),lx=-w/2,ly=-(o.t==='triangle'?r*.25:0)-fs*.35;
+    pg.drawText(t,{x:ux+lx*Math.cos(rd)-ly*Math.sin(rd),y:uy+lx*Math.sin(rd)+ly*Math.cos(rd),size:fs,font,rotate:degrees(th),color:hx(COL[o.t][1])})}});
+  save(new Blob([await d.save()],{type:'application/pdf'}),base+'_marcado.pdf');$('msg').textContent=''}
+ catch(err){$('msg').textContent='Erro ao exportar: '+(err.message||err)}};
+sync();
+</script></body></html>
