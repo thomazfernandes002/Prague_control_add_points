@@ -1,0 +1,6 @@
+# Static site: a single self-contained HTML page (PDF libraries load from CDNs).
+# The page is stored in the repo as "index" (no extension), so the build copies it
+# into the publish folder as index.html so it is served at "/" as text/html.
+[build]
+  command = "rm -rf dist && mkdir -p dist && cp index dist/index.html"
+  publish = "dist"
